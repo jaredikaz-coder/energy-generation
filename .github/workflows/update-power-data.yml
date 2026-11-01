@@ -1,7 +1,10 @@
 name: Update power station data
 
-# Power stations change slowly, so the map ships with them as a file and this
-# job refreshes that file once a week (and on demand from the Actions tab).
+# Built from a Geofabrik extract rather than Overpass: public Overpass
+# instances rate-limit shared CI addresses so hard that runs spent twenty
+# minutes in backoff and still came away empty. An extract has no limits and
+# finishes in a few minutes. tools/fetch-power-data.mjs remains for ad-hoc
+# Overpass fetches of other areas.
 on:
   schedule:
     - cron: '17 3 * * 0'      # Sundays, 03:17 UTC
@@ -17,7 +20,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -27,14 +30,27 @@ jobs:
         with:
           node-version: '22'
 
-      # Stations first, committed on their own, so the map has them as early as
-      # possible; line geometry is heavier and must not hold them up.
-      - name: Fetch power stations
-        id: stations
-        timeout-minutes: 25
-        run: PHASE=sites node tools/fetch-power-data.mjs
+      - name: Install osmium
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
 
-      - name: Commit stations
+      - name: Download the Great Britain extract
+        run: |
+          curl -L --fail --retry 3 --retry-delay 10 \
+            -o gb.osm.pbf https://download.geofabrik.de/europe/great-britain-latest.osm.pbf
+          ls -lh gb.osm.pbf
+
+      - name: Filter to power features
+        run: |
+          osmium tags-filter -o power.osm.pbf gb.osm.pbf \
+            nwr/power=plant nwr/power=generator w/power=line w/power=cable
+          ls -lh power.osm.pbf
+          osmium export power.osm.pbf -f geojsonseq --add-unique-id=type_id -o power.geojsonseq
+          wc -l power.geojsonseq
+
+      - name: Build the datasets
+        run: node tools/build-from-extract.mjs power.geojsonseq
+
+      - name: Commit any changes
         if: always()
         run: |
           git config user.name  "github-actions[bot]"
@@ -42,27 +58,8 @@ jobs:
           git pull --rebase --autostash origin main || true
           git add data
           if git diff --staged --quiet; then
-            echo "No change in station data."
+            echo "No change in the dataset."
           else
-            git commit -m "Update power station data ($(date -u +%Y-%m-%d))"
-            git push
-          fi
-
-      - name: Fetch transmission lines
-        if: always()
-        timeout-minutes: 25
-        run: PHASE=lines node tools/fetch-power-data.mjs
-
-      - name: Commit transmission lines
-        if: always()
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --rebase --autostash origin main || true
-          git add data
-          if git diff --staged --quiet; then
-            echo "No change in line data."
-          else
-            git commit -m "Update transmission line data ($(date -u +%Y-%m-%d))"
+            git commit -m "Update power station and line data ($(date -u +%Y-%m-%d))"
             git push
           fi
