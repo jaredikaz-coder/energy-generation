@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live Energy Generation Map</title>
+  <meta name="description" content="A live map of electricity generation — grid carbon intensity, fuel mix and nearby power stations — with your own location on it." />
+  <meta name="theme-color" content="#1d1f20" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"
+        integrity="sha512-Zcn6bjR/8RZbLEpLIeOwNtzREBAJnUKESxces60Mpoj+2okopSAcSUIUOseddDm0cxnGQzxIR7vJgsLZbdLE3w=="
+        crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-palette="#2a78d6,#eb6834,#1baf7a,#eda100,#e87ba4,#008300,#6250d6,#e34948">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <h1>Live Energy Map</h1>
+    </div>
+    <div class="toolbar">
+      <button id="btn-locate" class="btn primary">Locate me</button>
+      <button id="btn-follow" class="btn" aria-pressed="false">Follow: off</button>
+      <button id="btn-scan" class="btn">Scan this area</button>
+      <label class="check"><input type="checkbox" id="chk-grid" checked /> GB grid regions</label>
+      <label class="check"><input type="checkbox" id="chk-sites" checked /> Generation sites</label>
+      <div class="spacer"></div>
+      <span id="status" class="pill" role="status" aria-live="polite">Starting…</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="map-wrap">
+      <div id="map" role="application" aria-label="Map of live electricity generation"></div>
+      <div id="map-hint" class="map-hint" hidden></div>
+    </section>
+
+    <aside class="side" aria-label="Live energy readouts">
+
+      <section class="panel" id="panel-you">
+        <h2>Your location</h2>
+        <p class="muted small" id="geo-state">Not located yet.</p>
+        <dl class="kv" id="geo-kv" hidden>
+          <dt>Latitude</dt><dd id="geo-lat">—</dd>
+          <dt>Longitude</dt><dd id="geo-lon">—</dd>
+          <dt>Accuracy</dt><dd id="geo-acc">—</dd>
+          <dt>Speed</dt><dd id="geo-speed">—</dd>
+          <dt>Last fix</dt><dd id="geo-time">—</dd>
+        </dl>
+      </section>
+
+      <section class="panel" id="panel-mix">
+        <h2>Live GB grid</h2>
+        <div class="hero">
+          <div class="hero-num"><span id="ci-value">—</span><span class="hero-unit">gCO₂/kWh</span></div>
+          <div class="hero-label">Carbon intensity now · <span id="ci-index">—</span></div>
+        </div>
+        <p class="muted small" id="mix-scope">Live mix and carbon intensity are published for Great Britain.</p>
+        <figure class="mix">
+          <figcaption id="mix-caption">Share of electricity being generated right now</figcaption>
+          <div class="mixbar" id="mixbar" role="img" aria-label="Live generation mix"></div>
+          <div class="mix-legend" id="mix-legend"></div>
+        </figure>
+        <details class="table-view">
+          <summary>Show as table</summary>
+          <table id="mix-table"><thead><tr><th>Source</th><th>Share</th></tr></thead><tbody></tbody></table>
+        </details>
+        <p class="muted small" id="mix-foot">Source: National Grid ESO Carbon Intensity API (Great Britain).</p>
+      </section>
+
+      <section class="panel" id="panel-near">
+        <h2>Generation near you</h2>
+        <div class="stats">
+          <div class="stat"><span class="stat-num" id="near-count">—</span><span class="stat-cap">sites in view</span></div>
+          <div class="stat"><span class="stat-num" id="near-mw">—</span><span class="stat-cap">MW capacity</span></div>
+        </div>
+        <p class="muted small" id="near-nearest">Scan an area to list nearby power stations.</p>
+        <table class="src-table" id="src-table">
+          <thead><tr><th>Source</th><th>Sites</th><th>MW</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="muted small">Capacity is the site's nameplate rating from OpenStreetMap, not its live output.</p>
+      </section>
+
+      <section class="panel" id="panel-legend">
+        <h2>Legend</h2>
+        <ul class="legend" id="legend"></ul>
+        <h3>GB region carbon intensity</h3>
+        <ul class="ramp" id="ramp"></ul>
+      </section>
+
+      <p class="muted small credit">
+        Map © <a href="https://www.openstreetmap.org/copyright" rel="noreferrer">OpenStreetMap</a> contributors ·
+        sites via <a href="https://overpass-api.de/" rel="noreferrer">Overpass API</a> ·
+        grid data via <a href="https://carbonintensity.org.uk/" rel="noreferrer">Carbon Intensity API</a>
+      </p>
+    </aside>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"
+          integrity="sha512-BwHfrr4c9kmRkLw6iXFdzcdWV/PGkVgiIyIWLLlTSXzWQzxuSg4DiQUCpauz/EWjgk5TYQqX/kvn9pG1NpYfqg=="
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="app.js"></script>
+</body>
+</html>
