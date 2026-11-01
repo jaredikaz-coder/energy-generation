@@ -660,7 +660,12 @@
   function scanButton(busy) {
     var btn = $('btn-scan');
     btn.disabled = !!busy;
-    btn.textContent = busy ? 'Scanning…' : 'Scan this area';
+    if (busy) { btn.textContent = 'Scanning…'; return; }
+    var haveData = !!datasetMeta.plants && covered(map.getBounds(), tierFor(map.getZoom()));
+    btn.textContent = haveData ? 'Re-check live' : 'Scan this area';
+    btn.title = haveData
+      ? 'This view is already covered by the bundled dataset. This asks OpenStreetMap again, in case something changed since the weekly update.'
+      : 'This view is outside the bundled dataset, so stations are fetched from OpenStreetMap.';
   }
 
   function scan(auto, force) {
@@ -884,6 +889,7 @@
     drawSites();
     drawLines();
     updateNearby();
+    scanButton(false);
     clearTimeout(scanTimer);
     scanTimer = setTimeout(function () { scan(true); }, SCAN_DEBOUNCE_MS);
   });
@@ -896,9 +902,15 @@
   loadDataset('plants').then(function () {
     drawSites();
     updateNearby();
+    scanButton(false);
+    hint('');
     setStatus('Live · ' + sitesIn(map.getBounds()).length + ' sites in view', 'live');
   }).catch(function () {
     // No dataset committed yet (or it failed to load): live scanning covers it.
+    updateDataNote();
+    scanButton(false);
+    hint('No bundled station data on this copy yet — stations are being fetched live from OpenStreetMap as you pan. ' +
+         'Once the weekly data job has run, they load instantly with no scanning.');
   });
   loadGrid();
   gridTimer = setInterval(loadGrid, GRID_REFRESH_MS);
