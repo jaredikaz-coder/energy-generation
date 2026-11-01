@@ -15,10 +15,11 @@
   var CI_API = 'https://api.carbonintensity.org.uk';
   var OVERPASS = [
     'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter'
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter'
   ];
   var GRID_REFRESH_MS = 5 * 60 * 1000;   // grid mix updates every half hour
-  var SCAN_MIN_GAP_MS = 20 * 1000;       // be gentle with Overpass
+  var SCAN_DEBOUNCE_MS = 600;            // settle after panning before querying
   var MAX_SCAN_SPAN_DEG = 3.2;           // refuse to scan the whole continent
 
   // Source taxonomy. Colours come from the stylesheet so light/dark both work.
@@ -130,12 +131,26 @@
     return;
   }
 
-  var map = L.map('map', { center: [54.5, -3.2], zoom: 6, zoomControl: true, worldCopyJump: true });
+  // Reopen where you left off rather than back at the national view.
+  var VIEW_KEY = 'energy-map-view-v1';
+  var startView = { center: [54.5, -3.2], zoom: 6 };
+  try {
+    var savedView = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null');
+    if (savedView && isFinite(savedView.lat) && isFinite(savedView.lon) && isFinite(savedView.zoom)) {
+      startView = { center: [savedView.lat, savedView.lon], zoom: savedView.zoom };
+    }
+  } catch (e) { /* ignore unreadable storage */ }
+
+  var map = L.map('map', {
+    center: startView.center, zoom: startView.zoom, zoomControl: true, worldCopyJump: true,
+    preferCanvas: true                   // draw markers on a canvas: much faster on phones
+  });
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   }).addTo(map);
 
+  window.energyMap = map;                // exposed for debugging in the browser console
   var sitesLayer = L.layerGroup().addTo(map);
   var gridLayer = L.layerGroup().addTo(map);
   var meLayer = L.layerGroup().addTo(map);
@@ -345,10 +360,57 @@
   }
 
   // --------------------------------------------- live generation sites (OSM)
-  var sites = [];
-  var lastScan = 0;
-  var scanning = false;
+  // Scanning is the slow part: Overpass queues requests, so we (a) keep every
+  // site we have ever fetched, (b) remember which rectangles we have already
+  // covered and skip the network entirely for those, and (c) hedge the request
+  // across mirrors so one busy server cannot hold the whole scan up.
+  var STORE_KEY = 'energy-map-sites-v1';
+  var CACHE_TTL_MS = 60 * 60 * 1000;      // a power station is not news; an hour is plenty
+  var MAX_STORED_SITES = 2500;
+  var HEDGE_DELAYS = [0, 3500, 9000];     // when to bring each mirror in
+
+  var store = { sites: {}, rects: [] };   // rects: {s,w,n,e,t,tier}
   var interacted = false;
+  var scanAbort = null;
+  var scanTimer = null;
+  var tickTimer = null;
+
+  function loadStore() {
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      var parsed = JSON.parse(raw);
+      if (parsed && parsed.sites && parsed.rects) {
+        var now = Date.now();
+        store.sites = parsed.sites;
+        store.rects = parsed.rects.filter(function (r) { return now - r.t < CACHE_TTL_MS; });
+      }
+    } catch (e) { /* private mode, quota, corrupt value: start empty */ }
+  }
+  function saveStore() {
+    try {
+      var ids = Object.keys(store.sites);
+      if (ids.length > MAX_STORED_SITES) {
+        ids.slice(0, ids.length - MAX_STORED_SITES).forEach(function (id) { delete store.sites[id]; });
+      }
+      localStorage.setItem(STORE_KEY, JSON.stringify({ sites: store.sites, rects: store.rects.slice(-40) }));
+    } catch (e) { /* nothing we can do; the map still works in memory */ }
+  }
+  function allSites() {
+    return Object.keys(store.sites).map(function (k) { return store.sites[k]; });
+  }
+  function sitesIn(bounds) {
+    return allSites().filter(function (s) { return bounds.contains(s.latlng); });
+  }
+  // tier 1 = big plants only (low zoom), tier 2 = plants plus individual generators
+  function tierFor(zoom) { return zoom >= 12 ? 2 : 1; }
+  function covered(b, tier) {
+    var now = Date.now();
+    return store.rects.some(function (r) {
+      return r.tier >= tier && now - r.t < CACHE_TTL_MS &&
+        r.s <= b.getSouth() && r.w <= b.getWest() && r.n >= b.getNorth() && r.e >= b.getEast();
+    });
+  }
 
   function siteSource(tags) {
     var raw = tags['plant:source'] || tags['generator:source'] || tags['plant:method'] || '';
@@ -363,56 +425,112 @@
     return Math.max(5, Math.min(26, 5 + 2.4 * Math.sqrt(mw)));
   }
 
-  function overpassQuery(b) {
+  function overpassQuery(b, tier) {
     var bbox = [b.getSouth().toFixed(4), b.getWest().toFixed(4), b.getNorth().toFixed(4), b.getEast().toFixed(4)].join(',');
-    return '[out:json][timeout:25];(' +
-      'nwr["power"="plant"](' + bbox + ');' +
-      'nwr["power"="generator"]["generator:source"~"^(wind|hydro|nuclear|coal|gas|oil|diesel|biomass|biofuel|biogas|waste|geothermal|battery|pumped_storage)$"](' + bbox + ');' +
-      ');out center 600;';
+    var q = '[out:json][timeout:20];(nwr["power"="plant"](' + bbox + ');';
+    if (tier >= 2) {
+      q += 'nwr["power"="generator"]["generator:source"~"^(wind|hydro|nuclear|coal|gas|oil|diesel|biomass|biofuel|biogas|waste|geothermal|battery|pumped_storage)$"](' + bbox + ');';
+    }
+    return q + ');out center 600;';
   }
 
-  function postOverpass(query, index) {
-    index = index || 0;
-    if (index >= OVERPASS.length) return Promise.reject(new Error('all Overpass endpoints failed'));
-    return fetch(OVERPASS[index], {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'data=' + encodeURIComponent(query)
-    }).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    }).catch(function () {
-      return postOverpass(query, index + 1);
+  // Fire the first mirror immediately and bring the others in only if it is
+  // still thinking. First usable answer wins; the rest are aborted.
+  function hedgedOverpass(query, outerSignal) {
+    return new Promise(function (resolve, reject) {
+      var settled = false, failures = 0, timers = [], controllers = [];
+      function cleanup() {
+        timers.forEach(clearTimeout);
+        controllers.forEach(function (c) { try { c.abort(); } catch (e) {} });
+      }
+      function launch(i) {
+        if (settled) return;
+        var ctrl = new AbortController();
+        controllers.push(ctrl);
+        if (outerSignal) {
+          if (outerSignal.aborted) { try { ctrl.abort(); } catch (e) {} }
+          else outerSignal.addEventListener('abort', function () { try { ctrl.abort(); } catch (e) {} });
+        }
+        fetch(OVERPASS[i], {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'data=' + encodeURIComponent(query),
+          signal: ctrl.signal
+        }).then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        }).then(function (json) {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(json);
+        }).catch(function (err) {
+          if (settled) return;
+          failures++;
+          if (outerSignal && outerSignal.aborted) { settled = true; cleanup(); reject(err); return; }
+          if (failures >= OVERPASS.length) { settled = true; cleanup(); reject(err); }
+        });
+      }
+      OVERPASS.forEach(function (_, i) {
+        timers.push(setTimeout(function () { launch(i); }, HEDGE_DELAYS[i] || 0));
+      });
     });
+  }
+
+  function scanButton(busy) {
+    var btn = $('btn-scan');
+    btn.disabled = !!busy;
+    btn.textContent = busy ? 'Scanning…' : 'Scan this area';
   }
 
   function scan(auto) {
     var b = map.getBounds();
+    var tier = tierFor(map.getZoom());
     var span = Math.max(b.getNorth() - b.getSouth(), b.getEast() - b.getWest());
+
     if (span > MAX_SCAN_SPAN_DEG) {
       if (!auto || interacted) {
-        hint('Zoom in to scan for power stations in view — the area in view is too large to query.');
+        hint('Zoom in to scan for power stations — the area in view is too large to query.');
       }
       return;
     }
-    var now = Date.now();
-    if (scanning || (auto && now - lastScan < SCAN_MIN_GAP_MS)) return;
-    scanning = true;
-    lastScan = now;
+    // Already covered by an earlier scan: redraw from memory, no network at all.
+    if (covered(b, tier)) {
+      drawSites();
+      updateNearby();
+      setStatus('Live · ' + sitesIn(b).length + ' sites in view', 'live');
+      return;
+    }
+    if (scanAbort) {                      // a newer view supersedes the one in flight
+      scanAbort.abort();
+      scanAbort = null;
+    }
     hint('');
-    setStatus('Scanning area…', 'busy');
+    scanButton(true);
 
-    postOverpass(overpassQuery(b)).then(function (data) {
-      var seen = {};
-      sites = (data.elements || []).map(function (el) {
+    // Query a little beyond the screen so small pans stay inside the cache.
+    var qb = b.pad(0.3);
+    var started = Date.now();
+    var ctrl = new AbortController();
+    scanAbort = ctrl;
+
+    clearInterval(tickTimer);
+    setStatus('Scanning area…', 'busy');
+    tickTimer = setInterval(function () {
+      setStatus('Scanning area… ' + Math.round((Date.now() - started) / 1000) + 's', 'busy');
+    }, 1000);
+
+    hedgedOverpass(overpassQuery(qb, tier), ctrl.signal).then(function (data) {
+      if (ctrl.signal.aborted) return;
+      var added = 0;
+      (data.elements || []).forEach(function (el) {
         var tags = el.tags || {};
         var lat = el.lat != null ? el.lat : (el.center && el.center.lat);
         var lon = el.lon != null ? el.lon : (el.center && el.center.lon);
-        if (lat == null || lon == null) return null;
+        if (lat == null || lon == null) return;
         var id = el.type + '/' + el.id;
-        if (seen[id]) return null;
-        seen[id] = 1;
-        return {
+        if (!store.sites[id]) added++;
+        store.sites[id] = {
           id: id,
           latlng: [lat, lon],
           name: tags.name || tags.operator || (tags.power === 'plant' ? 'Unnamed power plant' : 'Unnamed generator'),
@@ -423,32 +541,54 @@
           kind: tags.power === 'plant' ? 'Power plant' : 'Generator',
           osm: 'https://www.openstreetmap.org/' + el.type + '/' + el.id
         };
-      }).filter(Boolean);
+      });
+      store.rects.push({ s: qb.getSouth(), w: qb.getWest(), n: qb.getNorth(), e: qb.getEast(), t: Date.now(), tier: tier });
+      if (store.rects.length > 40) store.rects = store.rects.slice(-40);
+      saveStore();
 
       drawSites();
       updateNearby();
-      setStatus('Live · ' + sites.length + ' sites · ' + clock(new Date()), 'live');
-      if (!sites.length) { hint('No mapped power stations in this view. Try a wider area or a different region.'); }
+      var secs = ((Date.now() - started) / 1000).toFixed(1);
+      var inView = sitesIn(map.getBounds()).length;
+      setStatus('Live · ' + inView + ' sites in view · ' + secs + ' s', 'live');
+      if (!inView) {
+        hint(added ? 'Nothing mapped inside this view — try panning or zooming out a little.'
+                   : 'No mapped power stations here. OpenStreetMap coverage varies by area.');
+      }
     }).catch(function (err) {
+      if (ctrl.signal.aborted || (err && err.name === 'AbortError')) return;
       setStatus('Site scan failed', 'error');
-      hint('Could not reach the Overpass API (' + (err && err.message ? err.message : 'network error') +
-           '). It rate-limits busy clients — wait a moment and press "Scan this area" again.');
-    }).then(function () { scanning = false; });
+      hint('Could not reach any Overpass mirror (' + (err && err.message ? err.message : 'network error') +
+           '). They rate-limit busy clients — wait a moment and tap "Scan this area" again.');
+    }).then(function () {
+      if (scanAbort === ctrl) scanAbort = null;
+      clearInterval(tickTimer);
+      scanButton(false);
+    });
   }
 
+  var drawn = {};
   function drawSites() {
-    sitesLayer.clearLayers();
-    sites.forEach(function (s) {
+    var b = map.getBounds().pad(0.2);
+    var keep = {};
+    sitesIn(b).forEach(function (s) {
+      keep[s.id] = true;
+      if (drawn[s.id]) return;                 // already on the map: leave it alone
       var m = L.circleMarker(s.latlng, {
         radius: radiusFor(s.mw),
         color: css('--panel'), weight: 2,
         fillColor: colorOf(s.source), fillOpacity: .9
       });
       m.bindTooltip(SRC[s.source].glyph + ' ' + esc(s.name) + (s.mw ? ' · ' + fmt(s.mw, s.mw < 10 ? 1 : 0) + ' MW' : ''));
-      m.on('click', function () { m.setPopupContent(popupHtml(s)); });
-      m.bindPopup(popupHtml(s));
+      m.bindPopup(function () { return popupHtml(s); });
       m.addTo(sitesLayer);
-      s._marker = m;
+      drawn[s.id] = m;
+    });
+    Object.keys(drawn).forEach(function (id) {        // drop markers far outside the view
+      if (!keep[id]) {
+        sitesLayer.removeLayer(drawn[id]);
+        delete drawn[id];
+      }
     });
   }
 
@@ -465,7 +605,7 @@
 
   function updateNearby() {
     var b = map.getBounds();
-    var inView = sites.filter(function (s) { return b.contains(s.latlng); });
+    var inView = sitesIn(b);
     var totalMW = inView.reduce(function (sum, s) { return sum + (s.mw || 0); }, 0);
 
     $('near-count').textContent = fmt(inView.length, 0);
@@ -492,9 +632,10 @@
       tbody.innerHTML = '<tr><td colspan="3" class="muted">Nothing scanned in this view yet.</td></tr>';
     }
 
-    if (me.latlng && sites.length) {
+    var known = allSites();
+    if (me.latlng && known.length) {
       var nearest = null, best = Infinity;
-      sites.forEach(function (s) {
+      known.forEach(function (s) {
         var d = haversineKm(me.latlng, s.latlng);
         if (d < best) { best = d; nearest = s; }
       });
@@ -503,7 +644,7 @@
           esc(SRC[nearest.source].label).toLowerCase() + ') — ' + distanceLabel(best) + ' away.';
       }
     } else if (me.latlng) {
-      $('near-nearest').textContent = 'Press "Scan this area" to find power stations around you.';
+      $('near-nearest').textContent = 'Tap "Scan this area" to find power stations around you.';
     }
   }
 
@@ -528,13 +669,24 @@
   })();
 
   // -------------------------------------------------------------------- wiring
-  $('btn-scan').addEventListener('click', function () { lastScan = 0; scan(false); });
+  $('btn-scan').addEventListener('click', function () { scan(false); });
   map.on('dragend zoomend', function () { interacted = true; });
   map.on('moveend', function () {
+    try {
+      var c = map.getCenter();
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ lat: c.lat, lon: c.lng, zoom: map.getZoom() }));
+    } catch (e) { /* storage unavailable: the map still works */ }
+  });
+  map.on('moveend', function () {
+    drawSites();
     updateNearby();
-    scan(true);
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(function () { scan(true); }, SCAN_DEBOUNCE_MS);
   });
 
+  loadStore();                           // sites from earlier visits appear instantly
+  drawSites();
+  updateNearby();
   loadGrid();
   gridTimer = setInterval(loadGrid, GRID_REFRESH_MS);
   startWatch();
@@ -543,5 +695,7 @@
   window.addEventListener('beforeunload', function () {
     if (me.watchId != null) navigator.geolocation.clearWatch(me.watchId);
     if (gridTimer) clearInterval(gridTimer);
+    if (tickTimer) clearInterval(tickTimer);
+    if (scanAbort) { try { scanAbort.abort(); } catch (e) {} }
   });
 })();

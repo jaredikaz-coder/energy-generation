@@ -59,6 +59,18 @@ the location dot works there too.
 - OpenStreetMap coverage of power infrastructure is good but not complete, and
   Overpass rate-limits busy clients; if a scan fails, wait a moment and tap
   **Scan this area** again.
+
+### Why scanning feels quick
+
+Overpass queues requests, so a single query can sit waiting for seconds. The
+page works around that: it asks the fastest mirror first and brings two others
+in only if that one is still thinking (first usable answer wins, the rest are
+cancelled); it remembers every site and every rectangle it has already covered
+for an hour, so panning back over old ground never touches the network; it keeps
+that memory in local storage, so a reopened page is populated before you tap
+anything, and it reopens on the view you left; below zoom 12 it asks only for
+whole power plants rather than every individual turbine; and markers are drawn
+on a canvas so hundreds of them stay smooth on a phone.
 - Needs an internet connection: map tiles and all three feeds are remote.
 
 ## Privacy

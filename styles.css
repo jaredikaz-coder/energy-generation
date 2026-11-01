@@ -90,6 +90,8 @@ a { color: inherit; }
   transition: background .12s, border-color .12s, transform .05s;
 }
 .btn:hover { border-color: var(--ink-muted); }
+.btn[disabled] { opacity: .6; cursor: progress; }
+.btn[disabled]:active { transform: none; }
 .btn:active { transform: translateY(1px); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.primary:hover { filter: brightness(1.06); }
