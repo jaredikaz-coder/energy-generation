@@ -14,10 +14,12 @@ Open it on a phone or a laptop and you get three live things on one screen:
   [Carbon Intensity API](https://carbonintensity.org.uk/). It refreshes itself
   every five minutes. Each of the 14 GB distribution regions is plotted and
   shaded by its own live intensity — tap one for its local mix.
-- **Power stations around you** — tap **Scan this area** (or just pan and zoom)
-  and the map queries [OpenStreetMap via Overpass](https://overpass-api.de/) for
-  power plants and generators in view, coloured by fuel and sized by capacity.
-  The sidebar totals them up and names the one nearest to you.
+- **Power stations around you** — these ship with the site as a data file built
+  from [OpenStreetMap](https://www.openstreetmap.org/), so they appear instantly
+  with no waiting: coloured by fuel, sized by capacity, totted up in the sidebar
+  with the one nearest to you named. Outside the covered area, or when you tap
+  **Scan this area** for a live check, the map queries
+  [Overpass](https://overpass-api.de/) directly instead.
 
 No accounts, no API keys, no build step, no server code. Three static files.
 
@@ -60,17 +62,29 @@ the location dot works there too.
   Overpass rate-limits busy clients; if a scan fails, wait a moment and tap
   **Scan this area** again.
 
-### Why scanning feels quick
+### Where the station data comes from
 
-Overpass queues requests, so a single query can sit waiting for seconds. The
-page works around that: it asks the fastest mirror first and brings two others
-in only if that one is still thinking (first usable answer wins, the rest are
-cancelled); it remembers every site and every rectangle it has already covered
-for an hour, so panning back over old ground never touches the network; it keeps
-that memory in local storage, so a reopened page is populated before you tap
-anything, and it reopens on the view you left; below zoom 12 it asks only for
-whole power plants rather than every individual turbine; and markers are drawn
-on a canvas so hundreds of them stay smooth on a phone.
+Power stations change on the scale of years, so they are **not** fetched live.
+`tools/fetch-power-data.mjs` queries OpenStreetMap once and writes two compact
+files that the page loads directly:
+
+| File | Contents | Loaded |
+| ---- | -------- | ------ |
+| `data/plants.json` | every `power=plant` in the covered area | at startup |
+| `data/generators.json` | individual generators (turbines, arrays, sets) | when you zoom past level 12 |
+
+`.github/workflows/update-power-data.yml` re-runs that script **every Sunday**
+and commits the result if anything changed, so the data stays current without
+anyone waiting on a query. You can also run it on demand from the Actions tab,
+or locally with `node tools/fetch-power-data.mjs` (set `BBOX="south,west,north,east"`
+to cover a different area).
+
+Overpass is still used, but only where the files cannot help: outside the
+covered area, and when you tap **Scan this area** for a deliberate live check.
+Those live queries ask the fastest mirror first and bring two others in only if
+it is still thinking, cache what they find for an hour, and persist it in local
+storage along with your last map view. Markers draw on a canvas and are added
+and removed incrementally, so panning stays smooth on a phone.
 - Needs an internet connection: map tiles and all three feeds are remote.
 
 ## Privacy
@@ -85,7 +99,10 @@ no backend, and the page stores nothing about you.
 | ---- | ------- |
 | `index.html` | Page structure |
 | `styles.css` | Styling, light and dark themes |
-| `app.js` | Geolocation, grid data, Overpass scanning, rendering |
+| `app.js` | Geolocation, grid data, dataset loading, live scanning, rendering |
+| `data/*.json` | Generated power-station data (see `data/README.md`) |
+| `tools/fetch-power-data.mjs` | Builds that data from OpenStreetMap |
+| `.github/workflows/update-power-data.yml` | Weekly refresh of the data |
 
 ## Credits
 

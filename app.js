@@ -20,6 +20,10 @@
   ];
   var GRID_REFRESH_MS = 5 * 60 * 1000;   // grid mix updates every half hour
   var SCAN_DEBOUNCE_MS = 600;            // settle after panning before querying
+  // Power stations barely change, so they ship with the site as a file and are
+  // refreshed weekly by .github/workflows/update-power-data.yml. Overpass is
+  // then only needed outside the covered area, or for a deliberate live check.
+  var DATASET = { plants: 'data/plants.json', generators: 'data/generators.json' };
   var MAX_SCAN_SPAN_DEG = 3.2;           // refuse to scan the whole continent
 
   // Source taxonomy. Colours come from the stylesheet so light/dark both work.
@@ -389,11 +393,19 @@
   }
   function saveStore() {
     try {
-      var ids = Object.keys(store.sites);
-      if (ids.length > MAX_STORED_SITES) {
-        ids.slice(0, ids.length - MAX_STORED_SITES).forEach(function (id) { delete store.sites[id]; });
+      // Only live-scanned sites are stored: the bundled dataset is already a
+      // cached file, and the rectangles it covers are re-added on every load.
+      var live = {}, n = 0;
+      Object.keys(store.sites).forEach(function (id) {
+        if (store.sites[id].live) { live[id] = store.sites[id]; n++; }
+      });
+      if (n > MAX_STORED_SITES) {
+        Object.keys(live).slice(0, n - MAX_STORED_SITES).forEach(function (id) { delete live[id]; });
       }
-      localStorage.setItem(STORE_KEY, JSON.stringify({ sites: store.sites, rects: store.rects.slice(-40) }));
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        sites: live,
+        rects: store.rects.filter(function (r) { return !r.perm; }).slice(-40)
+      }));
     } catch (e) { /* nothing we can do; the map still works in memory */ }
   }
   function allSites() {
@@ -407,9 +419,70 @@
   function covered(b, tier) {
     var now = Date.now();
     return store.rects.some(function (r) {
-      return r.tier >= tier && now - r.t < CACHE_TTL_MS &&
+      return r.tier >= tier && (r.perm || now - r.t < CACHE_TTL_MS) &&
         r.s <= b.getSouth() && r.w <= b.getWest() && r.n >= b.getNorth() && r.e >= b.getEast();
     });
+  }
+
+  var datasetBounds = null;               // area the bundled files cover
+  var datasetMeta = { plants: null, generators: null };
+  var datasetCount = 0;
+  var generatorsPending = null;
+  var OSM_TYPE = { n: 'node', w: 'way', r: 'relation' };
+
+  function applyDataset(doc, kind) {
+    var idx = {};
+    (doc.fields || []).forEach(function (f, i) { idx[f] = i; });
+    (doc.rows || []).forEach(function (row) {
+      var id = row[idx.id];
+      if (!id || (store.sites[id] && store.sites[id].live)) return;   // a live scan is fresher
+      var kindTag = row[idx.kind] === 'plant' ? 'Power plant' : 'Generator';
+      store.sites[id] = {
+        id: id,
+        latlng: [row[idx.lat], row[idx.lon]],
+        name: row[idx.name] || row[idx.operator] ||
+              (kindTag === 'Power plant' ? 'Unnamed power plant' : 'Unnamed generator'),
+        source: SRC[row[idx.source]] ? row[idx.source] : 'other',
+        mw: row[idx.mw],
+        operator: row[idx.operator] || null,
+        method: null,
+        kind: kindTag,
+        osm: 'https://www.openstreetmap.org/' + (OSM_TYPE[id.charAt(0)] || 'way') + '/' + id.slice(2),
+        live: false
+      };
+      datasetCount++;
+    });
+    var b = doc.bbox;
+    if (b && b.length === 4) {
+      datasetBounds = L.latLngBounds([b[0], b[1]], [b[2], b[3]]);
+      store.rects.push({
+        s: b[0], w: b[1], n: b[2], e: b[3], t: Date.now(),
+        tier: kind === 'generators' ? 2 : 1, perm: true
+      });
+    }
+    datasetMeta[kind] = doc.generated || null;
+    updateDataNote();
+  }
+
+  function loadDataset(kind) {
+    return fetch(DATASET[kind]).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (doc) { applyDataset(doc, kind); return doc; });
+  }
+
+  function updateDataNote() {
+    var el = $('data-note');
+    if (!el) return;
+    if (!datasetMeta.plants) {
+      el.textContent = 'No bundled dataset on this copy — stations are fetched live as you pan.';
+      return;
+    }
+    var when = new Date(datasetMeta.plants);
+    el.textContent = 'Bundled dataset: ' + fmt(datasetCount, 0) + ' stations, updated ' +
+      when.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) +
+      (datasetMeta.generators ? ' (with individual generators)' : '') +
+      '. Tap “Scan this area” for a live check against OpenStreetMap.';
   }
 
   function siteSource(tags) {
@@ -483,7 +556,7 @@
     btn.textContent = busy ? 'Scanning…' : 'Scan this area';
   }
 
-  function scan(auto) {
+  function scan(auto, force) {
     var b = map.getBounds();
     var tier = tierFor(map.getZoom());
     var span = Math.max(b.getNorth() - b.getSouth(), b.getEast() - b.getWest());
@@ -494,11 +567,27 @@
       }
       return;
     }
-    // Already covered by an earlier scan: redraw from memory, no network at all.
-    if (covered(b, tier)) {
+    // Already covered (bundled dataset or an earlier scan): redraw from memory.
+    if (!force && covered(b, tier)) {
       drawSites();
       updateNearby();
       setStatus('Live · ' + sitesIn(b).length + ' sites in view', 'live');
+      return;
+    }
+    // Inside the bundled area, zooming past the plant-level view just pulls the
+    // generator file once — still no Overpass query.
+    if (!force && datasetBounds && datasetBounds.contains(b) && tier >= 2 && !datasetMeta.generators) {
+      if (!generatorsPending) {
+        setStatus('Loading generators…', 'busy');
+        generatorsPending = loadDataset('generators').then(function () {
+          drawSites();
+          updateNearby();
+          setStatus('Live · ' + sitesIn(map.getBounds()).length + ' sites in view', 'live');
+        }).catch(function () {
+          generatorsPending = null;      // fall back to a live scan next time
+          scan(auto, true);
+        });
+      }
       return;
     }
     if (scanAbort) {                      // a newer view supersedes the one in flight
@@ -539,7 +628,8 @@
           operator: tags.operator || null,
           method: tags['plant:method'] || tags['generator:method'] || null,
           kind: tags.power === 'plant' ? 'Power plant' : 'Generator',
-          osm: 'https://www.openstreetmap.org/' + el.type + '/' + el.id
+          osm: 'https://www.openstreetmap.org/' + el.type + '/' + el.id,
+          live: true
         };
       });
       store.rects.push({ s: qb.getSouth(), w: qb.getWest(), n: qb.getNorth(), e: qb.getEast(), t: Date.now(), tier: tier });
@@ -669,7 +759,7 @@
   })();
 
   // -------------------------------------------------------------------- wiring
-  $('btn-scan').addEventListener('click', function () { scan(false); });
+  $('btn-scan').addEventListener('click', function () { scan(false, true); });   // force a live check
   map.on('dragend zoomend', function () { interacted = true; });
   map.on('moveend', function () {
     try {
@@ -687,6 +777,14 @@
   loadStore();                           // sites from earlier visits appear instantly
   drawSites();
   updateNearby();
+  updateDataNote();
+  loadDataset('plants').then(function () {
+    drawSites();
+    updateNearby();
+    setStatus('Live · ' + sitesIn(map.getBounds()).length + ' sites in view', 'live');
+  }).catch(function () {
+    // No dataset committed yet (or it failed to load): live scanning covers it.
+  });
   loadGrid();
   gridTimer = setInterval(loadGrid, GRID_REFRESH_MS);
   startWatch();

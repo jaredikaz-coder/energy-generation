@@ -1,0 +1,43 @@
+name: Update power station data
+
+# Power stations change slowly, so the map ships with them as a file and this
+# job refreshes that file once a week (and on demand from the Actions tab).
+on:
+  schedule:
+    - cron: '17 3 * * 0'      # Sundays, 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: power-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Fetch power stations from OpenStreetMap
+        run: node tools/fetch-power-data.mjs
+
+      - name: Commit any changes
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --staged --quiet; then
+            echo "No changes in the dataset."
+          else
+            git commit -m "Update power station data ($(date -u +%Y-%m-%d))"
+            git push
+          fi
