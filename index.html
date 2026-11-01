@@ -26,6 +26,7 @@
       <button id="btn-scan" class="btn">Scan this area</button>
       <label class="check"><input type="checkbox" id="chk-grid" checked /> GB grid regions</label>
       <label class="check"><input type="checkbox" id="chk-sites" checked /> Generation sites</label>
+      <label class="check"><input type="checkbox" id="chk-lines" checked /> Transmission lines</label>
       <div class="spacer"></div>
       <span id="status" class="pill" role="status" aria-live="polite">Starting…</span>
     </div>
@@ -88,6 +89,8 @@
       <section class="panel" id="panel-legend">
         <h2>Legend</h2>
         <ul class="legend" id="legend"></ul>
+        <h3>Transmission lines</h3>
+        <ul class="ramp" id="volt-legend"></ul>
         <h3>GB region carbon intensity</h3>
         <ul class="ramp" id="ramp"></ul>
       </section>

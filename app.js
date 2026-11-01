@@ -23,7 +23,19 @@
   // Power stations barely change, so they ship with the site as a file and are
   // refreshed weekly by .github/workflows/update-power-data.yml. Overpass is
   // then only needed outside the covered area, or for a deliberate live check.
-  var DATASET = { plants: 'data/plants.json', generators: 'data/generators.json' };
+  var DATASET = {
+    plants: 'data/plants.json',
+    generators: 'data/generators.json',
+    lines: 'data/lines.json'
+  };
+  // Transmission voltages: one hue, light to dark, thin to thick. Tuned for the
+  // map tiles rather than the page theme, since the basemap does not change.
+  var VOLTAGE_STEPS = [
+    { min: 400000, color: '#2e1f87', weight: 3.2, label: '400 kV' },
+    { min: 275000, color: '#4b38bd', weight: 2.6, label: '275 kV' },
+    { min: 132000, color: '#7a6ae0', weight: 2.0, label: '132 kV' },
+    { min: 0,      color: '#aaa0ee', weight: 1.5, label: 'under 132 kV' }
+  ];
   var MAX_SCAN_SPAN_DEG = 3.2;           // refuse to scan the whole continent
 
   // Source taxonomy. Colours come from the stylesheet so light/dark both work.
@@ -156,11 +168,19 @@
 
   window.energyMap = map;                // exposed for debugging in the browser console
   var sitesLayer = L.layerGroup().addTo(map);
+  var linesLayer = L.layerGroup().addTo(map);
   var gridLayer = L.layerGroup().addTo(map);
   var meLayer = L.layerGroup().addTo(map);
 
   $('chk-sites').addEventListener('change', function (e) {
     if (e.target.checked) { map.addLayer(sitesLayer); } else { map.removeLayer(sitesLayer); }
+  });
+  $('chk-lines').addEventListener('change', function (e) {
+    if (e.target.checked) {
+      if (lineStore.length) drawLines(); else loadLines().catch(function () {});
+    } else {
+      drawLines();                         // clears the layer
+    }
   });
   $('chk-grid').addEventListener('change', function (e) {
     if (e.target.checked) { map.addLayer(gridLayer); } else { map.removeLayer(gridLayer); }
@@ -479,10 +499,97 @@
       return;
     }
     var when = new Date(datasetMeta.plants);
-    el.textContent = 'Bundled dataset: ' + fmt(datasetCount, 0) + ' stations, updated ' +
-      when.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) +
+    el.textContent = 'Bundled dataset: ' + fmt(datasetCount, 0) + ' stations' +
+      (lineStore.length ? ' and ' + fmt(lineStore.length, 0) + ' transmission lines' : '') +
+      ', updated ' + when.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) +
       (datasetMeta.generators ? ' (with individual generators)' : '') +
       '. Tap “Scan this area” for a live check against OpenStreetMap.';
+  }
+
+  // ---------------------------------------------------- transmission lines
+  var lineStore = [];
+  var linesMeta = null;
+  var linesPending = null;
+  var drawnLines = {};
+
+  function voltStyleFor(v) {
+    for (var i = 0; i < VOLTAGE_STEPS.length; i++) {
+      if (v >= VOLTAGE_STEPS[i].min) return VOLTAGE_STEPS[i];
+    }
+    return VOLTAGE_STEPS[VOLTAGE_STEPS.length - 1];
+  }
+
+  function loadLines() {
+    if (linesPending) return linesPending;
+    linesPending = fetch(DATASET.lines).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (doc) {
+      var idx = {};
+      (doc.fields || []).forEach(function (f, i) { idx[f] = i; });
+      lineStore = (doc.rows || []).map(function (row) {
+        var pts = row[idx.points] || [];
+        var s0 = 90, w0 = 180, n0 = -90, e0 = -180;
+        pts.forEach(function (p) {
+          if (p[0] < s0) s0 = p[0];
+          if (p[0] > n0) n0 = p[0];
+          if (p[1] < w0) w0 = p[1];
+          if (p[1] > e0) e0 = p[1];
+        });
+        return {
+          id: row[idx.id], volts: row[idx.voltage], name: row[idx.name],
+          operator: row[idx.operator], cables: row[idx.cables], kind: row[idx.kind],
+          points: pts, bounds: L.latLngBounds([s0, w0], [n0, e0])
+        };
+      }).filter(function (l) { return l.points.length > 1; });
+      linesMeta = doc.generated || null;
+      drawLines();
+      updateDataNote();
+      return doc;
+    }).catch(function (err) {
+      linesPending = null;                 // allow a later retry
+      hint('Transmission lines are not available yet (' + (err && err.message ? err.message : 'no data file') +
+           '). They appear once the weekly data job has run.');
+      throw err;
+    });
+    return linesPending;
+  }
+
+  function drawLines() {
+    if (!$('chk-lines').checked) {
+      linesLayer.clearLayers();
+      drawnLines = {};
+      return;
+    }
+    var b = map.getBounds().pad(0.2);
+    var keep = {};
+    lineStore.forEach(function (l) {
+      if (!b.intersects(l.bounds)) return;
+      keep[l.id] = true;
+      if (drawnLines[l.id]) return;
+      var st = voltStyleFor(l.volts || 0);
+      var poly = L.polyline(l.points, {
+        color: st.color, weight: st.weight, opacity: .85,
+        dashArray: l.kind === 'cable' ? '6 4' : null      // cables (often subsea) dashed
+      });
+      poly.bindTooltip((l.name ? esc(l.name) + ' · ' : '') + st.label + (l.kind === 'cable' ? ' cable' : ''), { sticky: true });
+      poly.bindPopup(function () {
+        return '<h4>' + esc(l.name || (st.label + ' ' + l.kind)) + '</h4><div class="pop-kv">' +
+          '<b>Voltage</b><span>' + (l.volts ? fmt(l.volts / 1000, 0) + ' kV' : 'not tagged') + '</span>' +
+          '<b>Type</b><span>' + (l.kind === 'cable' ? 'Buried or subsea cable' : 'Overhead line') + '</span>' +
+          (l.operator ? '<b>Operator</b><span>' + esc(l.operator) + '</span>' : '') +
+          (l.cables ? '<b>Cables</b><span>' + l.cables + '</span>' : '') +
+          '</div><div class="muted small">Route from OpenStreetMap. Live loading on individual circuits is not published.</div>';
+      });
+      poly.addTo(linesLayer);
+      drawnLines[l.id] = poly;
+    });
+    Object.keys(drawnLines).forEach(function (id) {
+      if (!keep[id]) {
+        linesLayer.removeLayer(drawnLines[id]);
+        delete drawnLines[id];
+      }
+    });
   }
 
   function siteSource(tags) {
@@ -746,6 +853,12 @@
       li.innerHTML = '<i class="swatch" style="background:' + colorOf(s.key) + '"></i>' + s.glyph + ' ' + esc(s.label);
       ul.appendChild(li);
     });
+    var volts = $('volt-legend');
+    VOLTAGE_STEPS.forEach(function (st) {
+      var li = document.createElement('li');
+      li.innerHTML = '<i class="swatch" style="background:' + st.color + '"></i>' + esc(st.label);
+      volts.appendChild(li);
+    });
     var ramp = $('ramp');
     CI_STEPS.forEach(function (st) {
       var li = document.createElement('li');
@@ -769,6 +882,7 @@
   });
   map.on('moveend', function () {
     drawSites();
+    drawLines();
     updateNearby();
     clearTimeout(scanTimer);
     scanTimer = setTimeout(function () { scan(true); }, SCAN_DEBOUNCE_MS);
@@ -778,6 +892,7 @@
   drawSites();
   updateNearby();
   updateDataNote();
+  if ($('chk-lines').checked) loadLines().catch(function () {});
   loadDataset('plants').then(function () {
     drawSites();
     updateNearby();
