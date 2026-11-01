@@ -31,6 +31,13 @@
   --ci-4: #b4620f;
   --ci-5: #6f3a05;
 
+  /* Sequential ramp, one hue, light → dark (constrained megawatts). */
+  --con-1: #ffe5de;
+  --con-2: #ffb3a1;
+  --con-3: #ef6f54;
+  --con-4: #c3422a;
+  --con-5: #7d2013;
+
   --you: #0f62d6;
 }
 
@@ -98,6 +105,11 @@ a { color: inherit; }
 .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.link { text-decoration: none; display: inline-flex; align-items: center; }
 .check { font-size: .85rem; color: var(--ink-soft); display: inline-flex; align-items: center; gap: .3rem; white-space: nowrap; }
+
+.select-sm {
+  font: inherit; font-size: .85rem; padding: .2rem .3rem; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
 
 .pill {
   font-size: .78rem; padding: .25rem .6rem; border-radius: 999px;

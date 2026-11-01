@@ -26,8 +26,17 @@
   var DATASET = {
     plants: 'data/plants.json',
     generators: 'data/generators.json',
-    lines: 'data/lines.json'
+    lines: 'data/lines.json',
+    constraints: 'data/constraints.json'
   };
+  // Constrained megawatts: one hue, light to dark. Red means more held back.
+  var CONSTRAINT_STEPS = [
+    { max: 0,        vars: '--con-1', label: 'none' },
+    { max: 50,       vars: '--con-2', label: 'to 50' },
+    { max: 150,      vars: '--con-3', label: '50–150' },
+    { max: 400,      vars: '--con-4', label: '150–400' },
+    { max: Infinity, vars: '--con-5', label: '400+' }
+  ];
   // Transmission voltages: one hue, light to dark, thin to thick. Tuned for the
   // map tiles rather than the page theme, since the basemap does not change.
   var VOLTAGE_STEPS = [
@@ -322,6 +331,9 @@
       var centre = GB_REGIONS[r.regionid];
       if (!centre) return;                       // skip the England/Scotland/Wales roll-ups
       var g = r.intensity && (r.intensity.forecast != null ? r.intensity.forecast : r.intensity.actual);
+      var con = constraints && constraints.regions ? constraints.regions[r.regionid] : null;
+      var mode = shadeMode();
+      var fill = mode === 'constraint' ? constraintColor(con ? con.downMW : 0) : ciColor(g);
       var rows = mixToRows(r.generationmix);
       var mini = rows.map(function (x) {
         return '<i style="flex:' + x.perc + ' 0 0;background:' + colorOf(x.key) + '"></i>';
@@ -330,18 +342,97 @@
 
       L.circleMarker(centre, {
         radius: 13, color: css('--panel'), weight: 2,
-        fillColor: ciColor(g), fillOpacity: .92, className: 'gb-region'
+        fillColor: fill, fillOpacity: .92, className: 'gb-region'
       })
-        .bindTooltip(esc(r.shortname || r.dnoregion) + ' · ' + (g == null ? '—' : Math.round(g) + ' gCO₂/kWh'))
+        .bindTooltip(esc(r.shortname || r.dnoregion) + ' · ' + (mode === 'constraint'
+          ? (con && con.downMW ? con.downMW + ' MW held back' : 'no constraint actions')
+          : (g == null ? '—' : Math.round(g) + ' gCO₂/kWh')))
         .bindPopup(
           '<h4>' + esc(r.shortname || r.dnoregion) + '</h4>' +
           '<div class="pop-kv"><b>Carbon intensity</b><span>' + (g == null ? '—' : Math.round(g) + ' gCO₂/kWh') + '</span>' +
           '<b>Rating</b><span>' + esc((r.intensity && r.intensity.index) || '—') + '</span></div>' +
           '<div class="mini-mix">' + mini + '</div>' +
           '<div class="muted small">' + top + '</div>' +
+          (con ? '<div class="pop-kv" style="margin-top:.35rem">' +
+              '<b>Held back</b><span>' + fmt(con.downMW, 0) + ' MW</span>' +
+              '<b>Called on</b><span>' + fmt(con.upMW, 0) + ' MW</span></div>' +
+              (con.units && con.units.length
+                ? '<div class="muted small">' + con.units.slice(0, 3).map(function (u) {
+                    return esc(u.name) + ' ' + (u.deltaMW > 0 ? '+' : '') + u.deltaMW + ' MW';
+                  }).join('<br>') + '</div>'
+                : '')
+            : '<div class="muted small">No constraint actions recorded here.</div>') +
           '<div class="muted small">Regional indicator, not a boundary.</div>'
         )
         .addTo(gridLayer);
+    });
+  }
+
+  var constraints = null;        // { totals, regions: { <regionid>: {...} } }
+  var lastRegions = null;        // last Carbon Intensity regional payload, for re-shading
+
+  function constraintColor(mw) {
+    if (mw == null) return css('--s-other');
+    for (var i = 0; i < CONSTRAINT_STEPS.length; i++) {
+      if (mw <= CONSTRAINT_STEPS[i].max) return css(CONSTRAINT_STEPS[i].vars);
+    }
+    return css('--con-5');
+  }
+
+  function shadeMode() {
+    var sel = $('region-shade');
+    if (!constraints && sel.value === 'constraint') return 'intensity';   // nothing to shade with yet
+    return sel.value;
+  }
+
+  function renderRampLegend() {
+    var ramp = $('ramp'), mode = shadeMode();
+    ramp.innerHTML = '';
+    $('ramp-title').textContent = mode === 'constraint'
+      ? 'Region shading: megawatts constrained' : 'Region shading: carbon intensity';
+    (mode === 'constraint' ? CONSTRAINT_STEPS : CI_STEPS).forEach(function (st) {
+      var li = document.createElement('li');
+      li.innerHTML = '<i class="swatch" style="background:' + css(st.vars) + '"></i>' + esc(st.label);
+      ramp.appendChild(li);
+    });
+    var unit = document.createElement('li');
+    unit.className = 'muted';
+    unit.textContent = mode === 'constraint' ? 'MW held back' : 'gCO₂/kWh';
+    ramp.appendChild(unit);
+  }
+
+  function renderConstraintPanel() {
+    if (!constraints) return;
+    $('con-down').textContent = fmt(constraints.totals.downMW, 0);
+    $('con-up').textContent = fmt(constraints.totals.upMW, 0);
+    var list = Object.keys(constraints.regions).map(function (k) { return constraints.regions[k]; })
+      .sort(function (a, b) { return b.downMW - a.downMW; });
+    if (!list.length || !list[0].downMW) {
+      $('con-top').textContent = 'No generation is being held back for system reasons in this window.';
+    } else {
+      var top = list[0];
+      $('con-top').innerHTML = 'Most constrained: <strong>' + esc(top.name) + '</strong> — ' +
+        fmt(top.downMW, 0) + ' MW held back' +
+        (top.units[0] ? ', led by ' + esc(top.units[0].name) : '') + '.';
+    }
+    var when = new Date(constraints.generated);
+    $('con-foot').innerHTML = 'Generation moved for system reasons, from Elexon\'s balancing acceptances, ' +
+      'covering ' + clock(new Date(constraints.windowFrom)) + '–' + clock(new Date(constraints.windowTo)) +
+      ' (updated ' + clock(when) + '). This is constraint <em>action</em> by region — live loading on ' +
+      'individual circuits is not published for GB.';
+  }
+
+  function loadConstraints() {
+    return fetch(DATASET.constraints + '?t=' + Math.floor(Date.now() / 60000)).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (doc) {
+      constraints = doc;
+      renderConstraintPanel();
+      renderRampLegend();
+      if (lastRegions) renderRegions(lastRegions);
+    }).catch(function () {
+      $('con-top').textContent = 'No constraint data yet — the half-hourly job has not committed a file.';
     });
   }
 
@@ -371,7 +462,7 @@
         $('ci-index').textContent = (ci.intensity.index || '—') +
           (ci.intensity.actual == null ? ' (forecast)' : '');
       }
-      if (reg && reg.regions) { renderRegions(reg.regions); }
+      if (reg && reg.regions) { lastRegions = reg.regions; renderRegions(reg.regions); }
 
       setStatus('Live · grid ' + clock(new Date()), 'live');
       $('mix-foot').textContent = 'Source: National Grid ESO Carbon Intensity API (Great Britain). ' +
@@ -864,16 +955,7 @@
       li.innerHTML = '<i class="swatch" style="background:' + st.color + '"></i>' + esc(st.label);
       volts.appendChild(li);
     });
-    var ramp = $('ramp');
-    CI_STEPS.forEach(function (st) {
-      var li = document.createElement('li');
-      li.innerHTML = '<i class="swatch" style="background:' + css(st.vars) + '"></i>' + st.label;
-      ramp.appendChild(li);
-    });
-    var unit = document.createElement('li');
-    unit.className = 'muted';
-    unit.textContent = 'gCO₂/kWh';
-    ramp.appendChild(unit);
+    renderRampLegend();
   })();
 
   // -------------------------------------------------------------------- wiring
@@ -912,8 +994,13 @@
     hint('No bundled station data on this copy yet — stations are being fetched live from OpenStreetMap as you pan. ' +
          'Once the weekly data job has run, they load instantly with no scanning.');
   });
+  loadConstraints();
   loadGrid();
-  gridTimer = setInterval(loadGrid, GRID_REFRESH_MS);
+  gridTimer = setInterval(function () { loadGrid(); loadConstraints(); }, GRID_REFRESH_MS);
+  $('region-shade').addEventListener('change', function () {
+    renderRampLegend();
+    if (lastRegions) renderRegions(lastRegions);
+  });
   startWatch();
   hint('Live GB grid data is loading. Tap "Locate me" to put your dot on the map, then "Scan this area" for power stations around you.');
 

@@ -27,6 +27,12 @@
       <label class="check"><input type="checkbox" id="chk-grid" checked /> GB grid regions</label>
       <label class="check"><input type="checkbox" id="chk-sites" checked /> Generation sites</label>
       <label class="check"><input type="checkbox" id="chk-lines" checked /> Transmission lines</label>
+      <label class="check">Shade regions:
+        <select id="region-shade" class="select-sm">
+          <option value="constraint">Constraint</option>
+          <option value="intensity">Carbon intensity</option>
+        </select>
+      </label>
       <div class="spacer"></div>
       <span id="status" class="pill" role="status" aria-live="polite">Starting…</span>
     </div>
@@ -71,6 +77,16 @@
         <p class="muted small" id="mix-foot">Source: National Grid ESO Carbon Intensity API (Great Britain).</p>
       </section>
 
+      <section class="panel" id="panel-constraint">
+        <h2>Constraints now</h2>
+        <div class="stats">
+          <div class="stat"><span class="stat-num" id="con-down">—</span><span class="stat-cap">MW held back</span></div>
+          <div class="stat"><span class="stat-num" id="con-up">—</span><span class="stat-cap">MW called on</span></div>
+        </div>
+        <p class="muted small" id="con-top">Waiting for constraint data.</p>
+        <p class="muted small" id="con-foot">Generation moved for system reasons, from Elexon's balancing acceptances. This is constraint <em>action</em> by region — live loading on individual circuits is not published for GB.</p>
+      </section>
+
       <section class="panel" id="panel-near">
         <h2>Generation near you</h2>
         <div class="stats">
@@ -91,7 +107,7 @@
         <ul class="legend" id="legend"></ul>
         <h3>Transmission lines</h3>
         <ul class="ramp" id="volt-legend"></ul>
-        <h3>GB region carbon intensity</h3>
+        <h3 id="ramp-title">GB region shading</h3>
         <ul class="ramp" id="ramp"></ul>
       </section>
 

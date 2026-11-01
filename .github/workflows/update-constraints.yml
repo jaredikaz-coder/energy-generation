@@ -1,0 +1,38 @@
+name: Update constraint data
+
+# Elexon sends no CORS header, so the page cannot call it from a browser.
+# This fetches the system-flagged balancing acceptances, works out which
+# regions are being constrained, and commits a small file the map reads.
+on:
+  schedule:
+    - cron: '*/30 * * * *'     # best effort; GitHub delays schedules under load
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: constraint-data
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node tools/fetch-constraints.mjs
+      - name: Commit any changes
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/constraints.json
+          if git diff --staged --quiet; then
+            echo "No change."
+          else
+            git commit -m "Update constraint data ($(date -u +'%Y-%m-%d %H:%M')Z)"
+            git push
+          fi
