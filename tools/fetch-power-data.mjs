@@ -25,8 +25,12 @@ const MIRRORS = process.env.OVERPASS_URL
     ];
 
 const BBOX = (process.env.BBOX || '49.8,-8.7,61.2,2.2').split(',').map(Number);
-const TILE_DEG = Number(process.env.TILE_DEG || 3);
-const PAUSE_MS = Number(process.env.PAUSE_MS || 8000);
+const TILE_DEG = Number(process.env.TILE_DEG || 4);
+const PAUSE_MS = Number(process.env.PAUSE_MS || 6000);
+// Stations are what the map needs first, so they are fetched and written in
+// their own phase; line geometry is far heavier and comes second.
+const PHASE = process.env.PHASE || 'all';          // sites | lines | all
+const MAX_WAIT_PER_TILE_MS = Number(process.env.MAX_WAIT_PER_TILE_MS || 8 * 60 * 1000);
 const MIN_VOLTAGE = Number(process.env.MIN_VOLTAGE || 100000);   // transmission, not street poles
 const BACKOFF_MS = [20000, 45000, 90000, 150000, 240000, 300000];
 
@@ -70,7 +74,9 @@ function sourceOf(tags) {
 /** Patient, polite Overpass call: long backoff, Retry-After honoured, mirrors rotated. */
 async function overpass(query) {
   let lastErr;
+  let waited = 0;
   for (let attempt = 0; attempt < BACKOFF_MS.length * MIRRORS.length; attempt++) {
+    if (waited > MAX_WAIT_PER_TILE_MS) break;      // bound the run: move on to the next tile
     const url = MIRRORS[attempt % MIRRORS.length];
     try {
       const res = await fetch(url, {
@@ -87,6 +93,7 @@ async function overpass(query) {
           ? Math.min(retryAfter * 1000, 300000)
           : BACKOFF_MS[Math.min(Math.floor(attempt / MIRRORS.length), BACKOFF_MS.length - 1)];
         console.warn(`  · ${new URL(url).host} busy (HTTP ${res.status}); waiting ${Math.round(wait / 1000)}s`);
+        waited += wait;
         await sleep(wait);
         continue;
       }
@@ -96,6 +103,7 @@ async function overpass(query) {
       lastErr = err;
       const wait = BACKOFF_MS[Math.min(Math.floor(attempt / MIRRORS.length), BACKOFF_MS.length - 1)];
       console.warn(`  · ${new URL(url).host} failed (${err.message}); waiting ${Math.round(wait / 1000)}s`);
+      waited += wait;
       await sleep(wait);
     }
   }
@@ -112,14 +120,17 @@ function tiles([s, w, n, e]) {
   return out;
 }
 
-function query(bbox) {
+function sitesQuery(bbox) {
   return `[out:json][timeout:300];` +
     `(nwr["power"="plant"](${bbox});` +
-    `nwr["power"="generator"]["generator:source"~"${GENERATOR_SOURCES}"](${bbox}););->.sites;` +
+    `nwr["power"="generator"]["generator:source"~"${GENERATOR_SOURCES}"](${bbox}););` +
+    `out center 200000;`;
+}
+function linesQuery(bbox) {
+  return `[out:json][timeout:300];` +
     `(way["power"="line"]["voltage"](${bbox});` +
-    `way["power"="cable"]["voltage"](${bbox}););->.lines;` +
-    `.sites out center 200000;` +
-    `.lines out geom 60000;`;
+    `way["power"="cable"]["voltage"](${bbox}););` +
+    `out geom 60000;`;
 }
 
 const plants = new Map();
@@ -169,29 +180,29 @@ function ingest(elements) {
 
 const boxes = tiles(BBOX);
 const failed = [];
-console.log(`Fetching ${boxes.length} tiles of ${TILE_DEG}° across ${BBOX.join(', ')}`);
-
-for (const [i, [s, w, n, e]] of boxes.entries()) {
-  const bbox = [s, w, n, e].map((v) => v.toFixed(4)).join(',');
-  process.stdout.write(`tile ${i + 1}/${boxes.length} (${bbox}) … `);
-  try {
-    const data = await overpass(query(bbox));
-    const added = ingest(data.elements);
-    console.log(`+${added}  [plants ${plants.size}, generators ${generators.size}, lines ${lines.size}]`);
-  } catch (err) {
-    console.log(`FAILED (${err.message})`);
-    failed.push(bbox);                      // keep going: a partial dataset beats none
-  }
-  if (i < boxes.length - 1) await sleep(PAUSE_MS);
-}
-
-if (failed.length >= boxes.length) {
-  console.error('\nEvery tile failed — writing nothing and failing the run.');
-  process.exit(1);
-}
-
 const dataDir = new URL('../data/', import.meta.url);
 await mkdir(dataDir, { recursive: true });
+
+async function runPhase(name, buildQuery, writeAfterEachTile) {
+  console.log(`\n== ${name}: ${boxes.length} tiles of ${TILE_DEG}° across ${BBOX.join(', ')}`);
+  let ok = 0;
+  for (const [i, [s, w, n, e]] of boxes.entries()) {
+    const bbox = [s, w, n, e].map((v) => v.toFixed(4)).join(',');
+    process.stdout.write(`  tile ${i + 1}/${boxes.length} (${bbox}) … `);
+    try {
+      const data = await overpass(buildQuery(bbox));
+      const added = ingest(data.elements);
+      ok++;
+      console.log(`+${added}  [plants ${plants.size}, generators ${generators.size}, lines ${lines.size}]`);
+      await writeAfterEachTile();          // land what we have after every tile
+    } catch (err) {
+      console.log(`FAILED (${err.message})`);
+      failed.push(`${name}:${bbox}`);
+    }
+    if (i < boxes.length - 1) await sleep(PAUSE_MS);
+  }
+  return ok;
+}
 
 async function write(name, fields, rows, extraNote) {
   const doc = {
@@ -205,23 +216,36 @@ async function write(name, fields, rows, extraNote) {
     rows
   };
   await writeFile(new URL(name, dataDir), JSON.stringify(doc));
-  console.log(`  -> data/${name}: ${rows.length} records`);
 }
 
 const siteFields = ['id', 'lat', 'lon', 'source', 'mw', 'name', 'operator', 'kind'];
 const byCapacity = (a, b) => (b[4] || 0) - (a[4] || 0);
+const capacityNote = 'Capacity (mw) is the nameplate rating recorded in OpenStreetMap, not live output.';
 
-console.log('\nWriting files:');
-await write('plants.json', siteFields, [...plants.values()].sort(byCapacity),
-  'Capacity (mw) is the nameplate rating recorded in OpenStreetMap, not live output.');
-await write('generators.json', siteFields, [...generators.values()].sort(byCapacity),
-  'Capacity (mw) is the nameplate rating recorded in OpenStreetMap, not live output.');
-await write('lines.json', ['id', 'voltage', 'name', 'operator', 'cables', 'kind', 'points'],
-  [...lines.values()].sort((a, b) => (b[1] || 0) - (a[1] || 0)),
-  `Overhead lines and cables at ${MIN_VOLTAGE / 1000} kV and above. Voltage is the highest tagged value. ` +
-  'OpenStreetMap records the network, not its live loading.');
+const writeSites = async () => {
+  await write('plants.json', siteFields, [...plants.values()].sort(byCapacity), capacityNote);
+  await write('generators.json', siteFields, [...generators.values()].sort(byCapacity), capacityNote);
+};
+const writeLines = async () => {
+  await write('lines.json', ['id', 'voltage', 'name', 'operator', 'cables', 'kind', 'points'],
+    [...lines.values()].sort((a, b) => (b[1] || 0) - (a[1] || 0)),
+    `Overhead lines and cables at ${MIN_VOLTAGE / 1000} kV and above. Voltage is the highest tagged value. ` +
+    'OpenStreetMap records the network, not its live loading.');
+};
 
+let succeeded = 0;
+if (PHASE === 'sites' || PHASE === 'all') {
+  succeeded += await runPhase('stations', sitesQuery, writeSites);
+}
+if (PHASE === 'lines' || PHASE === 'all') {
+  succeeded += await runPhase('transmission lines', linesQuery, writeLines);
+}
+
+if (!succeeded) {
+  console.error('\nEvery tile failed — nothing new was written.');
+  process.exit(1);
+}
 if (failed.length) {
-  console.warn(`\nPartial dataset: ${failed.length} of ${boxes.length} tiles failed (${failed.join(' | ')}).`);
+  console.warn(`\nPartial: ${failed.length} tile(s) failed (${failed.join(' | ')}).`);
 }
 console.log(`\nDone: ${plants.size} plants, ${generators.size} generators, ${lines.size} lines.`);

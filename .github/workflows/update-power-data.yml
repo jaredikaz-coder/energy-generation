@@ -27,17 +27,42 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Fetch power stations from OpenStreetMap
-        run: node tools/fetch-power-data.mjs
+      # Stations first, committed on their own, so the map has them as early as
+      # possible; line geometry is heavier and must not hold them up.
+      - name: Fetch power stations
+        id: stations
+        timeout-minutes: 25
+        run: PHASE=sites node tools/fetch-power-data.mjs
 
-      - name: Commit any changes
+      - name: Commit stations
+        if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase --autostash origin main || true
           git add data
           if git diff --staged --quiet; then
-            echo "No changes in the dataset."
+            echo "No change in station data."
           else
             git commit -m "Update power station data ($(date -u +%Y-%m-%d))"
+            git push
+          fi
+
+      - name: Fetch transmission lines
+        if: always()
+        timeout-minutes: 25
+        run: PHASE=lines node tools/fetch-power-data.mjs
+
+      - name: Commit transmission lines
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase --autostash origin main || true
+          git add data
+          if git diff --staged --quiet; then
+            echo "No change in line data."
+          else
+            git commit -m "Update transmission line data ($(date -u +%Y-%m-%d))"
             git push
           fi
