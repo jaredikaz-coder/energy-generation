@@ -18,6 +18,11 @@ import { createInterface } from 'node:readline';
 
 const BBOX = (process.env.BBOX || '49.8,-8.7,61.2,2.2').split(',').map(Number);
 const MIN_VOLTAGE = Number(process.env.MIN_VOLTAGE || 100000);
+// OpenStreetMap maps roughly half a million individual rooftop solar panels in
+// GB. They are not generation anyone looks for on a map, and they would make
+// the file tens of megabytes, so a solar generator needs a real capacity to be
+// kept. Solar *farms* are tagged power=plant and are unaffected.
+const MIN_SOLAR_MW = Number(process.env.MIN_SOLAR_MW || 0.1);
 const GENERATOR_SOURCES = new Set(['wind', 'hydro', 'nuclear', 'coal', 'gas', 'oil', 'diesel',
   'biomass', 'biofuel', 'biogas', 'waste', 'geothermal', 'battery', 'pumped_storage', 'solar',
   'tidal', 'wave', 'hydrogen']);
@@ -81,7 +86,7 @@ const inBox = ([lat, lon]) => lat >= BBOX[0] && lat <= BBOX[2] && lon >= BBOX[1]
 const plants = new Map();
 const generators = new Map();
 const lines = new Map();
-let seen = 0, skipped = 0;
+let seen = 0, skipped = 0, skippedPanels = 0;
 
 const input = process.argv[2] ? createReadStream(process.argv[2]) : process.stdin;
 const rl = createInterface({ input, crlfDelay: Infinity });
@@ -110,16 +115,17 @@ for await (const raw of rl) {
   const isPlant = tags.power === 'plant';
   const isGenerator = tags.power === 'generator';
   if (!isPlant && !isGenerator) continue;
+  const mw = parseCapacityMW(tags['plant:output:electricity'] || tags['generator:output:electricity']);
   if (isGenerator) {
     const src = String(tags['generator:source'] || '').split(';')[0].trim().toLowerCase();
     if (!GENERATOR_SOURCES.has(src)) continue;
+    if (src === 'solar' && !(mw >= MIN_SOLAR_MW)) { skippedPanels++; continue; }
   }
   const c = centroid(f.geometry);
   if (!c || !inBox(c)) continue;
   const into = isPlant ? plants : generators;
   if (into.has(id)) continue;
-  into.set(id, [id, round(c[0]), round(c[1]), sourceOf(tags),
-    parseCapacityMW(tags['plant:output:electricity'] || tags['generator:output:electricity']),
+  into.set(id, [id, round(c[0]), round(c[1]), sourceOf(tags), mw,
     tags.name || null, tags.operator || null, isPlant ? 'plant' : 'generator']);
 }
 
@@ -139,7 +145,7 @@ const siteFields = ['id', 'lat', 'lon', 'source', 'mw', 'name', 'operator', 'kin
 const byCapacity = (a, b) => (b[4] || 0) - (a[4] || 0);
 const capacityNote = 'Capacity (mw) is the nameplate rating recorded in OpenStreetMap, not live output.';
 
-console.log(`Read ${seen} features (${skipped} unparsable).`);
+console.log(`Read ${seen} features (${skipped} unparsable, ${skippedPanels} rooftop solar panels left out).`);
 await write('plants.json', siteFields, [...plants.values()].sort(byCapacity), capacityNote);
 await write('generators.json', siteFields, [...generators.values()].sort(byCapacity), capacityNote);
 await write('lines.json', ['id', 'voltage', 'name', 'operator', 'cables', 'kind', 'points'],
