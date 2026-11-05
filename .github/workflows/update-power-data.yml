@@ -5,9 +5,9 @@ name: Update power station data
 # minutes in backoff and still came away empty. An extract has no limits and
 # finishes in a few minutes. tools/fetch-power-data.mjs remains for ad-hoc
 # Overpass fetches of other areas.
+# Scheduled runs are disabled: nothing fires on its own. Run manually from
+# the Actions tab if needed.
 on:
-  schedule:
-    - cron: '17 3 * * 0'      # Sundays, 03:17 UTC
   workflow_dispatch:
 
 permissions:

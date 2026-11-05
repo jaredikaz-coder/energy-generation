@@ -3,9 +3,9 @@ name: Update constraint data
 # Elexon sends no CORS header, so the page cannot call it from a browser.
 # This fetches the system-flagged balancing acceptances, works out which
 # regions are being constrained, and commits a small file the map reads.
+# Scheduled runs are disabled: nothing fires on its own. Run manually from
+# the Actions tab if needed.
 on:
-  schedule:
-    - cron: '*/30 * * * *'     # best effort; GitHub delays schedules under load
   workflow_dispatch:
 
 permissions:
